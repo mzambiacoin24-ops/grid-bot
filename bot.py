@@ -18,14 +18,12 @@ GRID_COUNT = 10
 GRID_SPREAD = 0.015
 DRY_RUN = True
 
-BASE_URL = "https://api.binance.com"
-
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        log(f"Telegram error: {e}")
 
 def log(msg):
     now = datetime.now().strftime("%H:%M:%S")
@@ -39,39 +37,31 @@ def get_signature(params, secret):
         hashlib.sha256
     ).hexdigest()
 
-def get_price(symbol):
-    try:
-        url = f"{BASE_URL}/api/v3/ticker/price?symbol={symbol}"
-        r = requests.get(url, timeout=10)
-        return float(r.json()["price"])
-    except Exception as e:
-        log(f"Error kupata price: {e}")
-        return None
-
-def get_balance():
-    if DRY_RUN:
-        return {"USDT": CAPITAL, "SOL": 0.0}
-    try:
-        params = {"timestamp": int(time.time() * 1000)}
-        params["signature"] = get_signature(params, API_SECRET)
-        headers = {"X-MBX-APIKEY": API_KEY}
-        url = f"{BASE_URL}/api/v3/account"
-        r = requests.get(url, headers=headers, params=params)
-        balances = r.json().get("balances", [])
-        result = {}
-        for b in balances:
-            if b["asset"] in ["USDT", "SOL"]:
-                result[b["asset"]] = float(b["free"])
-        return result
-    except Exception as e:
-        log(f"Error kupata balance: {e}")
-        return None
+def get_price():
+    sources = [
+        "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+        "https://price.jup.ag/v4/price?ids=So11111111111111111111111111111111111111112",
+    ]
+    for url in sources:
+        try:
+            r = requests.get(url, timeout=10)
+            data = r.json()
+            if "solana" in data:
+                return float(data["solana"]["usd"])
+            if "data" in data:
+                sol = data["data"].get("So11111111111111111111111111111111111111112", {})
+                if sol:
+                    return float(sol["price"])
+        except:
+            continue
+    return None
 
 def place_order(side, price, quantity):
     if DRY_RUN:
         log(f"[SIMULATION] {side} {quantity:.4f} SOL @ ${price:.2f}")
         return {"status": "FILLED", "price": price, "qty": quantity}
     try:
+        BASE_URL = "https://api.binance.com"
         params = {
             "symbol": SYMBOL,
             "side": side,
@@ -84,7 +74,7 @@ def place_order(side, price, quantity):
         params["signature"] = get_signature(params, API_SECRET)
         headers = {"X-MBX-APIKEY": API_KEY}
         url = f"{BASE_URL}/api/v3/order"
-        r = requests.post(url, headers=headers, params=params)
+        r = requests.post(url, headers=headers, params=params, timeout=10)
         return r.json()
     except Exception as e:
         log(f"Order error: {e}")
@@ -98,16 +88,12 @@ def calculate_grids(current_price):
             continue
         price = current_price * (1 + i * GRID_SPREAD)
         side = "BUY" if i < 0 else "SELL"
-        grids.append({
-            "price": round(price, 4),
-            "side": side,
-            "level": i
-        })
+        grids.append({"price": round(price, 4), "side": side})
     return grids
 
 def run_grid_bot():
     msg = (
-        "🤖 Grid Bot Inaanza!\n"
+        f"🤖 Grid Bot Inaanza!\n"
         f"💰 Capital: ${CAPITAL}\n"
         f"📊 Symbol: {SYMBOL}\n"
         f"🔢 Grids: {GRID_COUNT}\n"
@@ -116,15 +102,16 @@ def run_grid_bot():
     log(msg)
     send_telegram(msg)
 
-    price = get_price(SYMBOL)
+    price = get_price()
     if not price:
-        log("Imeshindwa kupata price. Bot inasimama.")
-        send_telegram("❌ Bot imeshindwa kupata price. Imesimama!")
+        msg = "❌ Imeshindwa kupata price. Bot inasimama!"
+        log(msg)
+        send_telegram(msg)
         return
 
-    start_msg = f"💲 SOL Price ya sasa: ${price:.2f}"
-    log(start_msg)
-    send_telegram(start_msg)
+    msg = f"💲 SOL Price ya sasa: ${price:.2f}"
+    log(msg)
+    send_telegram(msg)
 
     grids = calculate_grids(price)
     amount_per_grid = CAPITAL / (GRID_COUNT / 2)
@@ -138,13 +125,20 @@ def run_grid_bot():
 
     filled_buys = []
     total_pnl = 0.0
+    error_count = 0
 
     while True:
         try:
-            current_price = get_price(SYMBOL)
+            current_price = get_price()
             if not current_price:
-                time.sleep(5)
+                error_count += 1
+                if error_count >= 5:
+                    send_telegram("⚠️ Imeshindwa kupata bei mara 5. Inaendelea kujaribu...")
+                    error_count = 0
+                time.sleep(15)
                 continue
+
+            error_count = 0
 
             for order in active_orders:
                 if order["filled"]:
@@ -154,7 +148,7 @@ def run_grid_bot():
                     result = place_order("BUY", order["price"], order["qty"])
                     if result:
                         order["filled"] = True
-                        filled_buys.append(order)
+                        filled_buys.append(order.copy())
                         msg = (
                             f"🟢 BUY imefanyika!\n"
                             f"💲 Bei: ${order['price']:.4f}\n"
@@ -165,10 +159,7 @@ def run_grid_bot():
                         send_telegram(msg)
 
                 elif order["side"] == "SELL" and current_price >= order["price"]:
-                    matching_buy = next(
-                        (b for b in filled_buys if not b.get("sold")),
-                        None
-                    )
+                    matching_buy = next((b for b in filled_buys if not b.get("sold")), None)
                     if matching_buy:
                         result = place_order("SELL", order["price"], order["qty"])
                         if result:
@@ -199,7 +190,7 @@ def run_grid_bot():
                     active_orders.append({**g, "qty": qty, "filled": False})
                 filled_buys = []
 
-            time.sleep(10)
+            time.sleep(15)
 
         except KeyboardInterrupt:
             msg = f"🛑 Bot imesimamishwa.\n📈 Total PnL: ${total_pnl:.4f}"
@@ -208,7 +199,7 @@ def run_grid_bot():
             break
         except Exception as e:
             log(f"Error: {e}")
-            time.sleep(10)
+            time.sleep(15)
 
 if __name__ == "__main__":
     run_grid_bot()
