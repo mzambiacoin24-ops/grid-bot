@@ -1,22 +1,28 @@
-import os
 import time
 import hmac
 import hashlib
+import base64
 import requests
-from urllib.parse import urlencode
 from datetime import datetime
 
-API_KEY = os.environ.get("BINANCE_API_KEY", "")
-API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+KUCOIN_API_KEY = "69d36930d5d5ab0001a2e3be"
+KUCOIN_API_SECRET = "fd52e48e-39b1-4704-bc75-537b800d9e3c"
+KUCOIN_PASSPHRASE = "gridbot2026"
 
 TELEGRAM_TOKEN = "8632951293:AAF1hhp3hz-ZjgJwaMmfAozEgbpxK9yCsNo"
 TELEGRAM_CHAT_ID = "7010983039"
 
-SYMBOL = "SOLUSDT"
+SYMBOL = "SOL-USDT"
 CAPITAL = 30
 GRID_COUNT = 10
 GRID_SPREAD = 0.015
 DRY_RUN = True
+
+BASE_URL = "https://api.kucoin.com"
+
+def log(msg):
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"[{now}] {msg}")
 
 def send_telegram(msg):
     try:
@@ -25,57 +31,60 @@ def send_telegram(msg):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-def log(msg):
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] {msg}")
-
-def get_signature(params, secret):
-    query = urlencode(params)
-    return hmac.new(
-        secret.encode(),
-        query.encode(),
-        hashlib.sha256
-    ).hexdigest()
+def get_headers(method, endpoint, body=""):
+    timestamp = str(int(time.time() * 1000))
+    str_to_sign = timestamp + method.upper() + endpoint + body
+    signature = base64.b64encode(
+        hmac.new(
+            KUCOIN_API_SECRET.encode(),
+            str_to_sign.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    passphrase = base64.b64encode(
+        hmac.new(
+            KUCOIN_API_SECRET.encode(),
+            KUCOIN_PASSPHRASE.encode(),
+            hashlib.sha256
+        ).digest()
+    ).decode()
+    return {
+        "KC-API-KEY": KUCOIN_API_KEY,
+        "KC-API-SIGN": signature,
+        "KC-API-TIMESTAMP": timestamp,
+        "KC-API-PASSPHRASE": passphrase,
+        "KC-API-KEY-VERSION": "2",
+        "Content-Type": "application/json"
+    }
 
 def get_price():
-    sources = [
-        "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
-        "https://price.jup.ag/v4/price?ids=So11111111111111111111111111111111111111112",
-    ]
-    for url in sources:
-        try:
-            r = requests.get(url, timeout=10)
-            data = r.json()
-            if "solana" in data:
-                return float(data["solana"]["usd"])
-            if "data" in data:
-                sol = data["data"].get("So11111111111111111111111111111111111111112", {})
-                if sol:
-                    return float(sol["price"])
-        except:
-            continue
-    return None
-
-def place_order(side, price, quantity):
-    if DRY_RUN:
-        log(f"[SIMULATION] {side} {quantity:.4f} SOL @ ${price:.2f}")
-        return {"status": "FILLED", "price": price, "qty": quantity}
     try:
-        BASE_URL = "https://api.binance.com"
-        params = {
+        url = f"{BASE_URL}/api/v1/market/orderbook/level1?symbol={SYMBOL}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        return float(data["data"]["price"])
+    except Exception as e:
+        log(f"Error kupata price: {e}")
+        return None
+
+def place_order(side, price, size):
+    if DRY_RUN:
+        log(f"[SIMULATION] {side} {size:.4f} SOL @ ${price:.4f}")
+        return {"orderId": "sim123"}
+    try:
+        import json
+        endpoint = "/api/v1/orders"
+        body = json.dumps({
+            "clientOid": str(int(time.time() * 1000)),
+            "side": side.lower(),
             "symbol": SYMBOL,
-            "side": side,
-            "type": "LIMIT",
-            "timeInForce": "GTC",
-            "quantity": round(quantity, 2),
-            "price": round(price, 2),
-            "timestamp": int(time.time() * 1000)
-        }
-        params["signature"] = get_signature(params, API_SECRET)
-        headers = {"X-MBX-APIKEY": API_KEY}
-        url = f"{BASE_URL}/api/v3/order"
-        r = requests.post(url, headers=headers, params=params, timeout=10)
-        return r.json()
+            "type": "limit",
+            "price": str(round(price, 4)),
+            "size": str(round(size, 4)),
+        })
+        headers = get_headers("POST", endpoint, body)
+        r = requests.post(BASE_URL + endpoint, headers=headers, data=body, timeout=10)
+        return r.json().get("data")
     except Exception as e:
         log(f"Order error: {e}")
         return None
@@ -93,7 +102,7 @@ def calculate_grids(current_price):
 
 def run_grid_bot():
     msg = (
-        f"🤖 Grid Bot Inaanza!\n"
+        f"🤖 KuCoin Grid Bot Inaanza!\n"
         f"💰 Capital: ${CAPITAL}\n"
         f"📊 Symbol: {SYMBOL}\n"
         f"🔢 Grids: {GRID_COUNT}\n"
@@ -159,7 +168,9 @@ def run_grid_bot():
                         send_telegram(msg)
 
                 elif order["side"] == "SELL" and current_price >= order["price"]:
-                    matching_buy = next((b for b in filled_buys if not b.get("sold")), None)
+                    matching_buy = next(
+                        (b for b in filled_buys if not b.get("sold")), None
+                    )
                     if matching_buy:
                         result = place_order("SELL", order["price"], order["qty"])
                         if result:
