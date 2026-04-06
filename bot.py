@@ -2,6 +2,7 @@ import time
 import hmac
 import hashlib
 import base64
+import json
 import requests
 from datetime import datetime
 
@@ -12,7 +13,7 @@ KUCOIN_PASSPHRASE = "gridbot2026"
 TELEGRAM_TOKEN = "8632951293:AAF1hhp3hz-ZjgJwaMmfAozEgbpxK9yCsNo"
 TELEGRAM_CHAT_ID = "7010983039"
 
-SYMBOL = "SOL-USDT"
+SYMBOL = "XRP-USDT"
 CAPITAL = 30
 GRID_COUNT = 10
 GRID_SPREAD = 0.015
@@ -69,10 +70,9 @@ def get_price():
 
 def place_order(side, price, size):
     if DRY_RUN:
-        log(f"[SIMULATION] {side} {size:.4f} SOL @ ${price:.4f}")
+        log(f"[SIMULATION] {side} {size:.2f} XRP @ ${price:.4f}")
         return {"orderId": "sim123"}
     try:
-        import json
         endpoint = "/api/v1/orders"
         body = json.dumps({
             "clientOid": str(int(time.time() * 1000)),
@@ -80,7 +80,7 @@ def place_order(side, price, size):
             "symbol": SYMBOL,
             "type": "limit",
             "price": str(round(price, 4)),
-            "size": str(round(size, 4)),
+            "size": str(round(size, 2)),
         })
         headers = get_headers("POST", endpoint, body)
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body, timeout=10)
@@ -118,7 +118,7 @@ def run_grid_bot():
         send_telegram(msg)
         return
 
-    msg = f"💲 SOL Price ya sasa: ${price:.2f}"
+    msg = f"💲 XRP Price ya sasa: ${price:.4f}"
     log(msg)
     send_telegram(msg)
 
@@ -161,7 +161,7 @@ def run_grid_bot():
                         msg = (
                             f"🟢 BUY imefanyika!\n"
                             f"💲 Bei: ${order['price']:.4f}\n"
-                            f"📦 Kiasi: {order['qty']:.4f} SOL\n"
+                            f"📦 Kiasi: {order['qty']:.2f} XRP\n"
                             f"🧪 SIMULATION"
                         )
                         log(msg)
@@ -181,7 +181,7 @@ def run_grid_bot():
                             msg = (
                                 f"🔴 SELL imefanyika!\n"
                                 f"💲 Bei: ${order['price']:.4f}\n"
-                                f"📦 Kiasi: {order['qty']:.4f} SOL\n"
+                                f"📦 Kiasi: {order['qty']:.2f} XRP\n"
                                 f"💰 PnL: +${pnl:.4f}\n"
                                 f"📈 Total PnL: ${total_pnl:.4f}\n"
                                 f"🧪 SIMULATION"
