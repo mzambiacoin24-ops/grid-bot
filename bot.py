@@ -15,8 +15,8 @@ TELEGRAM_CHAT_ID = "7010983039"
 
 SYMBOL = "XRP-USDT"
 CAPITAL = 30
-GRID_COUNT = 10
-GRID_SPREAD = 0.015
+GRID_COUNT = 20
+GRID_SPREAD = 0.003
 DRY_RUN = True
 
 BASE_URL = "https://api.kucoin.com"
@@ -102,10 +102,11 @@ def calculate_grids(current_price):
 
 def run_grid_bot():
     msg = (
-        f"🤖 KuCoin Grid Bot Inaanza!\n"
+        f"🤖 XRP Decimal Grid Bot Inaanza!\n"
         f"💰 Capital: ${CAPITAL}\n"
         f"📊 Symbol: {SYMBOL}\n"
         f"🔢 Grids: {GRID_COUNT}\n"
+        f"📏 Spread: {GRID_SPREAD*100}% (decimal mode)\n"
         f"🧪 Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}"
     )
     log(msg)
@@ -126,14 +127,21 @@ def run_grid_bot():
     amount_per_grid = CAPITAL / (GRID_COUNT / 2)
 
     active_orders = []
+    grid_lines = []
     for g in grids:
         qty = amount_per_grid / g["price"]
         active_orders.append({**g, "qty": qty, "filled": False})
+        emoji = "🟢" if g["side"] == "BUY" else "🔴"
+        grid_lines.append(f"{emoji} {g['side']} @ ${g['price']:.4f}")
 
-    send_telegram(f"📋 Grids {GRID_COUNT} zimeandaliwa. Bot inaangalia market...")
+    grid_msg = "📋 Grid Levels:\n" + "\n".join(grid_lines)
+    log(grid_msg)
+    send_telegram(grid_msg)
+    send_telegram("👀 Bot inaangalia decimal movements...")
 
     filled_buys = []
     total_pnl = 0.0
+    trade_count = 0
     error_count = 0
 
     while True:
@@ -142,9 +150,9 @@ def run_grid_bot():
             if not current_price:
                 error_count += 1
                 if error_count >= 5:
-                    send_telegram("⚠️ Imeshindwa kupata bei mara 5. Inaendelea kujaribu...")
+                    send_telegram("⚠️ Imeshindwa kupata bei mara 5. Inaendelea...")
                     error_count = 0
-                time.sleep(15)
+                time.sleep(5)
                 continue
 
             error_count = 0
@@ -158,10 +166,12 @@ def run_grid_bot():
                     if result:
                         order["filled"] = True
                         filled_buys.append(order.copy())
+                        trade_count += 1
                         msg = (
-                            f"🟢 BUY imefanyika!\n"
+                            f"🟢 BUY #{trade_count}\n"
                             f"💲 Bei: ${order['price']:.4f}\n"
-                            f"📦 Kiasi: {order['qty']:.2f} XRP\n"
+                            f"📦 XRP: {order['qty']:.2f}\n"
+                            f"📊 Market: ${current_price:.4f}\n"
                             f"🧪 SIMULATION"
                         )
                         log(msg)
@@ -178,12 +188,14 @@ def run_grid_bot():
                             matching_buy["sold"] = True
                             pnl = (order["price"] - matching_buy["price"]) * order["qty"]
                             total_pnl += pnl
+                            trade_count += 1
                             msg = (
-                                f"🔴 SELL imefanyika!\n"
+                                f"🔴 SELL #{trade_count}\n"
                                 f"💲 Bei: ${order['price']:.4f}\n"
-                                f"📦 Kiasi: {order['qty']:.2f} XRP\n"
-                                f"💰 PnL: +${pnl:.4f}\n"
+                                f"📦 XRP: {order['qty']:.2f}\n"
+                                f"💰 PnL Trade: +${pnl:.4f}\n"
                                 f"📈 Total PnL: ${total_pnl:.4f}\n"
+                                f"🔄 Trades: {trade_count}\n"
                                 f"🧪 SIMULATION"
                             )
                             log(msg)
@@ -191,7 +203,12 @@ def run_grid_bot():
 
             all_filled = all(o["filled"] for o in active_orders)
             if all_filled:
-                msg = f"🔄 Grids zote zimefanyika! Inaanza upya...\n📈 Total PnL: ${total_pnl:.4f}"
+                msg = (
+                    f"🔄 Grids zote zimefanyika!\n"
+                    f"📈 Total PnL: ${total_pnl:.4f}\n"
+                    f"🔄 Trades: {trade_count}\n"
+                    f"🔁 Inaanza upya..."
+                )
                 log(msg)
                 send_telegram(msg)
                 grids = calculate_grids(current_price)
@@ -201,16 +218,16 @@ def run_grid_bot():
                     active_orders.append({**g, "qty": qty, "filled": False})
                 filled_buys = []
 
-            time.sleep(15)
+            time.sleep(5)
 
         except KeyboardInterrupt:
-            msg = f"🛑 Bot imesimamishwa.\n📈 Total PnL: ${total_pnl:.4f}"
+            msg = f"🛑 Bot imesimamishwa.\n📈 Total PnL: ${total_pnl:.4f}\n🔄 Trades: {trade_count}"
             log(msg)
             send_telegram(msg)
             break
         except Exception as e:
             log(f"Error: {e}")
-            time.sleep(15)
+            time.sleep(5)
 
 if __name__ == "__main__":
     run_grid_bot()
