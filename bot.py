@@ -9,6 +9,9 @@ from datetime import datetime
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 
+TELEGRAM_TOKEN = "8632951293:AAF1hhp3hz-ZjgJwaMmfAozEgbpxK9yCsNo"
+TELEGRAM_CHAT_ID = "7010983039"
+
 SYMBOL = "SOLUSDT"
 CAPITAL = 30
 GRID_COUNT = 10
@@ -16,6 +19,13 @@ GRID_SPREAD = 0.015
 DRY_RUN = True
 
 BASE_URL = "https://api.binance.com"
+
+def send_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=10)
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 def log(msg):
     now = datetime.now().strftime("%H:%M:%S")
@@ -96,34 +106,35 @@ def calculate_grids(current_price):
     return grids
 
 def run_grid_bot():
-    log("Bot inaanza...")
-    log(f"Capital: ${CAPITAL}")
-    log(f"Symbol: {SYMBOL}")
-    log(f"Grids: {GRID_COUNT}")
-    log(f"Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}")
-    log("=" * 40)
+    msg = (
+        "🤖 Grid Bot Inaanza!\n"
+        f"💰 Capital: ${CAPITAL}\n"
+        f"📊 Symbol: {SYMBOL}\n"
+        f"🔢 Grids: {GRID_COUNT}\n"
+        f"🧪 Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}"
+    )
+    log(msg)
+    send_telegram(msg)
 
     price = get_price(SYMBOL)
     if not price:
         log("Imeshindwa kupata price. Bot inasimama.")
+        send_telegram("❌ Bot imeshindwa kupata price. Imesimama!")
         return
 
-    log(f"SOL Price ya sasa: ${price:.2f}")
+    start_msg = f"💲 SOL Price ya sasa: ${price:.2f}"
+    log(start_msg)
+    send_telegram(start_msg)
 
     grids = calculate_grids(price)
     amount_per_grid = CAPITAL / (GRID_COUNT / 2)
 
-    log(f"Kila grid: ${amount_per_grid:.2f}")
-    log("=" * 40)
-
     active_orders = []
     for g in grids:
         qty = amount_per_grid / g["price"]
-        log(f"{g['side']} @ ${g['price']:.4f} | Qty: {qty:.4f} SOL")
         active_orders.append({**g, "qty": qty, "filled": False})
 
-    log("=" * 40)
-    log("Bot inaangalia market...")
+    send_telegram(f"📋 Grids {GRID_COUNT} zimeandaliwa. Bot inaangalia market...")
 
     filled_buys = []
     total_pnl = 0.0
@@ -144,7 +155,14 @@ def run_grid_bot():
                     if result:
                         order["filled"] = True
                         filled_buys.append(order)
-                        log(f"BUY imefanyika @ ${order['price']:.4f}")
+                        msg = (
+                            f"🟢 BUY imefanyika!\n"
+                            f"💲 Bei: ${order['price']:.4f}\n"
+                            f"📦 Kiasi: {order['qty']:.4f} SOL\n"
+                            f"🧪 SIMULATION"
+                        )
+                        log(msg)
+                        send_telegram(msg)
 
                 elif order["side"] == "SELL" and current_price >= order["price"]:
                     matching_buy = next(
@@ -158,12 +176,22 @@ def run_grid_bot():
                             matching_buy["sold"] = True
                             pnl = (order["price"] - matching_buy["price"]) * order["qty"]
                             total_pnl += pnl
-                            log(f"SELL @ ${order['price']:.4f} | PnL: +${pnl:.4f}")
-                            log(f"Total PnL: ${total_pnl:.4f}")
+                            msg = (
+                                f"🔴 SELL imefanyika!\n"
+                                f"💲 Bei: ${order['price']:.4f}\n"
+                                f"📦 Kiasi: {order['qty']:.4f} SOL\n"
+                                f"💰 PnL: +${pnl:.4f}\n"
+                                f"📈 Total PnL: ${total_pnl:.4f}\n"
+                                f"🧪 SIMULATION"
+                            )
+                            log(msg)
+                            send_telegram(msg)
 
             all_filled = all(o["filled"] for o in active_orders)
             if all_filled:
-                log("Grids zote zimefanyika — inaanza upya...")
+                msg = f"🔄 Grids zote zimefanyika! Inaanza upya...\n📈 Total PnL: ${total_pnl:.4f}"
+                log(msg)
+                send_telegram(msg)
                 grids = calculate_grids(current_price)
                 active_orders = []
                 for g in grids:
@@ -174,7 +202,9 @@ def run_grid_bot():
             time.sleep(10)
 
         except KeyboardInterrupt:
-            log(f"Bot imesimamishwa. Total PnL: ${total_pnl:.4f}")
+            msg = f"🛑 Bot imesimamishwa.\n📈 Total PnL: ${total_pnl:.4f}"
+            log(msg)
+            send_telegram(msg)
             break
         except Exception as e:
             log(f"Error: {e}")
