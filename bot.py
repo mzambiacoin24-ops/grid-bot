@@ -4,22 +4,21 @@ import hashlib
 import base64
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
-KUCOIN_API_KEY = "69d36930d5d5ab0001a2e3be"
-KUCOIN_API_SECRET = "fd52e48e-39b1-4704-bc75-537b800d9e3c"
-KUCOIN_PASSPHRASE = "gridbot2026"
+OKX_API_KEY = "a0457663-9fdc-4787-b27e-5b7b7f34e99b"
+OKX_SECRET = "B803CF81AB7DCFD262399F893D755497"
+OKX_PASSPHRASE = "Futuresbot2026."
 
 TELEGRAM_TOKEN = "8632951293:AAF1hhp3hz-ZjgJwaMmfAozEgbpxK9yCsNo"
 TELEGRAM_CHAT_ID = "7010983039"
 
 SYMBOL = "XRP-USDT"
-CAPITAL = 30
-GRID_COUNT = 20
+GRID_COUNT = 10
 GRID_SPREAD = 0.003
-DRY_RUN = True
+DRY_RUN = False
 
-BASE_URL = "https://api.kucoin.com"
+BASE_URL = "https://www.okx.com"
 
 def log(msg):
     now = datetime.now().strftime("%H:%M:%S")
@@ -32,59 +31,75 @@ def send_telegram(msg):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-def get_headers(method, endpoint, body=""):
-    timestamp = str(int(time.time() * 1000))
-    str_to_sign = timestamp + method.upper() + endpoint + body
+def get_headers(method, path, body=""):
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    message = timestamp + method.upper() + path + body
     signature = base64.b64encode(
         hmac.new(
-            KUCOIN_API_SECRET.encode(),
-            str_to_sign.encode(),
-            hashlib.sha256
-        ).digest()
-    ).decode()
-    passphrase = base64.b64encode(
-        hmac.new(
-            KUCOIN_API_SECRET.encode(),
-            KUCOIN_PASSPHRASE.encode(),
+            OKX_SECRET.encode(),
+            message.encode(),
             hashlib.sha256
         ).digest()
     ).decode()
     return {
-        "KC-API-KEY": KUCOIN_API_KEY,
-        "KC-API-SIGN": signature,
-        "KC-API-TIMESTAMP": timestamp,
-        "KC-API-PASSPHRASE": passphrase,
-        "KC-API-KEY-VERSION": "2",
+        "OK-ACCESS-KEY": OKX_API_KEY,
+        "OK-ACCESS-SIGN": signature,
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json"
     }
 
+def get_usdt_balance():
+    try:
+        path = "/api/v5/account/balance?ccy=USDT"
+        headers = get_headers("GET", path)
+        r = requests.get(BASE_URL + path, headers=headers, timeout=10)
+        data = r.json()
+        details = data.get("data", [{}])[0].get("details", [])
+        for d in details:
+            if d.get("ccy") == "USDT":
+                balance = float(d.get("availBal", 0))
+                log(f"Balance ya USDT: ${balance:.4f}")
+                return balance
+        return 0.0
+    except Exception as e:
+        log(f"Balance error: {e}")
+        return 0.0
+
 def get_price():
     try:
-        url = f"{BASE_URL}/api/v1/market/orderbook/level1?symbol={SYMBOL}"
-        r = requests.get(url, timeout=10)
+        path = f"/api/v5/market/ticker?instId={SYMBOL}"
+        r = requests.get(BASE_URL + path, timeout=10)
         data = r.json()
-        return float(data["data"]["price"])
+        price = float(data.get("data", [{}])[0].get("last", 0))
+        return price
     except Exception as e:
-        log(f"Error kupata price: {e}")
+        log(f"Price error: {e}")
         return None
 
 def place_order(side, price, size):
     if DRY_RUN:
-        log(f"[SIMULATION] {side} {size:.2f} XRP @ ${price:.4f}")
-        return {"orderId": "sim123"}
+        log(f"[SIM] {side} {size:.4f} XRP @ ${price:.4f}")
+        return {"ordId": "sim123"}
     try:
-        endpoint = "/api/v1/orders"
+        path = "/api/v5/trade/order"
         body = json.dumps({
-            "clientOid": str(int(time.time() * 1000)),
+            "instId": SYMBOL,
+            "tdMode": "cash",
             "side": side.lower(),
-            "symbol": SYMBOL,
-            "type": "limit",
-            "price": str(round(price, 4)),
-            "size": str(round(size, 2)),
+            "ordType": "limit",
+            "px": str(round(price, 4)),
+            "sz": str(round(size, 4)),
         })
-        headers = get_headers("POST", endpoint, body)
-        r = requests.post(BASE_URL + endpoint, headers=headers, data=body, timeout=10)
-        return r.json().get("data")
+        headers = get_headers("POST", path, body)
+        r = requests.post(BASE_URL + path, headers=headers, data=body, timeout=10)
+        data = r.json()
+        result = data.get("data", [{}])[0]
+        if data.get("code") == "0":
+            return result
+        else:
+            log(f"Order failed: {data.get('msg')} | {result.get('sMsg')}")
+            return None
     except Exception as e:
         log(f"Order error: {e}")
         return None
@@ -101,30 +116,43 @@ def calculate_grids(current_price):
     return grids
 
 def run_grid_bot():
+    balance = get_usdt_balance()
+
+    if balance < 1.0:
+        msg = f"❌ Balance ndogo sana: ${balance:.4f}\nHitaji angalau $1 USDT!"
+        log(msg)
+        send_telegram(msg)
+        return
+
+    capital = round(balance * 0.95, 4)
+
+    mode = "🔴 LIVE" if not DRY_RUN else "🧪 SIMULATION"
+
     msg = (
-        f"🤖 XRP Decimal Grid Bot Inaanza!\n"
-        f"💰 Capital: ${CAPITAL}\n"
+        f"🤖 OKX XRP Grid Bot Inaanza!\n"
+        f"💰 Balance: ${balance:.4f} USDT\n"
+        f"💵 Capital: ${capital:.4f} USDT\n"
         f"📊 Symbol: {SYMBOL}\n"
         f"🔢 Grids: {GRID_COUNT}\n"
-        f"📏 Spread: {GRID_SPREAD*100}% (decimal mode)\n"
-        f"🧪 Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}"
+        f"📏 Spread: {GRID_SPREAD*100}%\n"
+        f"⚡ Mode: {mode}"
     )
     log(msg)
     send_telegram(msg)
 
     price = get_price()
     if not price:
-        msg = "❌ Imeshindwa kupata price. Bot inasimama!"
+        msg = "❌ Imeshindwa kupata price!"
         log(msg)
         send_telegram(msg)
         return
 
-    msg = f"💲 XRP Price ya sasa: ${price:.4f}"
+    msg = f"💲 XRP Bei ya sasa: ${price:.4f}"
     log(msg)
     send_telegram(msg)
 
     grids = calculate_grids(price)
-    amount_per_grid = CAPITAL / (GRID_COUNT / 2)
+    amount_per_grid = capital / (GRID_COUNT / 2)
 
     active_orders = []
     grid_lines = []
@@ -137,7 +165,7 @@ def run_grid_bot():
     grid_msg = "📋 Grid Levels:\n" + "\n".join(grid_lines)
     log(grid_msg)
     send_telegram(grid_msg)
-    send_telegram("👀 Bot inaangalia decimal movements...")
+    send_telegram("👀 Bot inaangalia market...")
 
     filled_buys = []
     total_pnl = 0.0
@@ -150,7 +178,7 @@ def run_grid_bot():
             if not current_price:
                 error_count += 1
                 if error_count >= 5:
-                    send_telegram("⚠️ Imeshindwa kupata bei mara 5. Inaendelea...")
+                    send_telegram("⚠️ Imeshindwa kupata bei. Inaendelea...")
                     error_count = 0
                 time.sleep(5)
                 continue
@@ -170,9 +198,9 @@ def run_grid_bot():
                         msg = (
                             f"🟢 BUY #{trade_count}\n"
                             f"💲 Bei: ${order['price']:.4f}\n"
-                            f"📦 XRP: {order['qty']:.2f}\n"
+                            f"📦 XRP: {order['qty']:.4f}\n"
                             f"📊 Market: ${current_price:.4f}\n"
-                            f"🧪 SIMULATION"
+                            f"⚡ {mode}"
                         )
                         log(msg)
                         send_telegram(msg)
@@ -192,11 +220,10 @@ def run_grid_bot():
                             msg = (
                                 f"🔴 SELL #{trade_count}\n"
                                 f"💲 Bei: ${order['price']:.4f}\n"
-                                f"📦 XRP: {order['qty']:.2f}\n"
-                                f"💰 PnL Trade: +${pnl:.4f}\n"
-                                f"📈 Total PnL: ${total_pnl:.4f}\n"
-                                f"🔄 Trades: {trade_count}\n"
-                                f"🧪 SIMULATION"
+                                f"📦 XRP: {order['qty']:.4f}\n"
+                                f"💰 PnL: +${pnl:.4f}\n"
+                                f"📈 Jumla PnL: ${total_pnl:.4f}\n"
+                                f"⚡ {mode}"
                             )
                             log(msg)
                             send_telegram(msg)
@@ -205,13 +232,14 @@ def run_grid_bot():
             if all_filled:
                 msg = (
                     f"🔄 Grids zote zimefanyika!\n"
-                    f"📈 Total PnL: ${total_pnl:.4f}\n"
+                    f"📈 Jumla PnL: ${total_pnl:.4f}\n"
                     f"🔄 Trades: {trade_count}\n"
                     f"🔁 Inaanza upya..."
                 )
                 log(msg)
                 send_telegram(msg)
-                grids = calculate_grids(current_price)
+                price = get_price()
+                grids = calculate_grids(price)
                 active_orders = []
                 for g in grids:
                     qty = amount_per_grid / g["price"]
@@ -221,7 +249,7 @@ def run_grid_bot():
             time.sleep(5)
 
         except KeyboardInterrupt:
-            msg = f"🛑 Bot imesimamishwa.\n📈 Total PnL: ${total_pnl:.4f}\n🔄 Trades: {trade_count}"
+            msg = f"🛑 Bot imesimamishwa.\n📈 Jumla PnL: ${total_pnl:.4f}\n🔄 Trades: {trade_count}"
             log(msg)
             send_telegram(msg)
             break
