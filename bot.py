@@ -172,18 +172,48 @@ def run_grid_bot():
     trade_count = 0
     error_count = 0
 
+    # ✅ START WITH BUY
+    initial_qty = (capital * 0.2) / price
+    buy_result = place_order("BUY", price, initial_qty)
+    if buy_result:
+        msg = f"🚀 START BUY\n💲 Bei: ${price:.4f}\n📦 XRP: {initial_qty:.4f}"
+        log(msg)
+        send_telegram(msg)
+        filled_buys.append({
+            "price": price,
+            "qty": initial_qty,
+            "filled": True,
+            "sold": False
+        })
+
+    grid_top = max(g["price"] for g in grids)
+
     while True:
         try:
             current_price = get_price()
             if not current_price:
                 error_count += 1
-                if error_count >= 5:
-                    send_telegram("⚠️ Imeshindwa kupata bei. Inaendelea...")
-                    error_count = 0
                 time.sleep(5)
                 continue
 
             error_count = 0
+
+            # ✅ AUTO RESET GRID
+            if current_price > grid_top:
+                msg = f"🔄 RESET GRID\nPrice: ${current_price:.4f}"
+                log(msg)
+                send_telegram(msg)
+
+                price = current_price
+                grids = calculate_grids(price)
+
+                active_orders = []
+                for g in grids:
+                    qty = amount_per_grid / g["price"]
+                    active_orders.append({**g, "qty": qty, "filled": False})
+
+                grid_top = max(g["price"] for g in grids)
+                continue
 
             for order in active_orders:
                 if order["filled"]:
@@ -195,20 +225,12 @@ def run_grid_bot():
                         order["filled"] = True
                         filled_buys.append(order.copy())
                         trade_count += 1
-                        msg = (
-                            f"🟢 BUY #{trade_count}\n"
-                            f"💲 Bei: ${order['price']:.4f}\n"
-                            f"📦 XRP: {order['qty']:.4f}\n"
-                            f"📊 Market: ${current_price:.4f}\n"
-                            f"⚡ {mode}"
-                        )
+                        msg = f"🟢 BUY #{trade_count}\n💲 {order['price']:.4f}"
                         log(msg)
                         send_telegram(msg)
 
                 elif order["side"] == "SELL" and current_price >= order["price"]:
-                    matching_buy = next(
-                        (b for b in filled_buys if not b.get("sold")), None
-                    )
+                    matching_buy = next((b for b in filled_buys if not b.get("sold")), None)
                     if matching_buy:
                         result = place_order("SELL", order["price"], order["qty"])
                         if result:
@@ -217,42 +239,12 @@ def run_grid_bot():
                             pnl = (order["price"] - matching_buy["price"]) * order["qty"]
                             total_pnl += pnl
                             trade_count += 1
-                            msg = (
-                                f"🔴 SELL #{trade_count}\n"
-                                f"💲 Bei: ${order['price']:.4f}\n"
-                                f"📦 XRP: {order['qty']:.4f}\n"
-                                f"💰 PnL: +${pnl:.4f}\n"
-                                f"📈 Jumla PnL: ${total_pnl:.4f}\n"
-                                f"⚡ {mode}"
-                            )
+                            msg = f"🔴 SELL #{trade_count}\n💰 +${pnl:.4f}"
                             log(msg)
                             send_telegram(msg)
 
-            all_filled = all(o["filled"] for o in active_orders)
-            if all_filled:
-                msg = (
-                    f"🔄 Grids zote zimefanyika!\n"
-                    f"📈 Jumla PnL: ${total_pnl:.4f}\n"
-                    f"🔄 Trades: {trade_count}\n"
-                    f"🔁 Inaanza upya..."
-                )
-                log(msg)
-                send_telegram(msg)
-                price = get_price()
-                grids = calculate_grids(price)
-                active_orders = []
-                for g in grids:
-                    qty = amount_per_grid / g["price"]
-                    active_orders.append({**g, "qty": qty, "filled": False})
-                filled_buys = []
-
             time.sleep(5)
 
-        except KeyboardInterrupt:
-            msg = f"🛑 Bot imesimamishwa.\n📈 Jumla PnL: ${total_pnl:.4f}\n🔄 Trades: {trade_count}"
-            log(msg)
-            send_telegram(msg)
-            break
         except Exception as e:
             log(f"Error: {e}")
             time.sleep(5)
