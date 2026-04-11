@@ -13,12 +13,28 @@ OKX_PASSPHRASE = "Futuresbot2026."
 TELEGRAM_TOKEN = "8632951293:AAF1hhp3hz-ZjgJwaMmfAozEgbpxK9yCsNo"
 TELEGRAM_CHAT_ID = "7010983039"
 
-SYMBOL = "XRP-USDT"
-GRID_COUNT = 10
-GRID_SPREAD = 0.003
+BASE_URL = "https://www.okx.com"
+
 DRY_RUN = False
 
-BASE_URL = "https://www.okx.com"
+GRID_COUNT = 10
+GRID_SPREAD = 0.004
+REBALANCE_THRESHOLD = 0.015
+SCAN_INTERVAL = 3600
+CHECK_INTERVAL = 10
+
+MIN_VOLUME_USD = 500_000
+MIN_VOLATILITY = 2.0
+MAX_VOLATILITY = 15.0
+MIN_PRICE = 0.001
+MAX_PRICE = 100.0
+
+BLACKLIST = ["USDC", "USDT", "BUSD", "DAI", "TUSD", "USDP", "BTC", "ETH"]
+
+total_pnl = 0.0
+trade_count = 0
+current_symbol = None
+initial_balance = 0.0
 
 def log(msg):
     now = datetime.now().strftime("%H:%M:%S")
@@ -32,24 +48,20 @@ def send_telegram(msg):
         log(f"Telegram error: {e}")
 
 def get_headers(method, path, body=""):
-    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-    message = timestamp + method.upper() + path + body
-    signature = base64.b64encode(
-        hmac.new(
-            OKX_SECRET.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).digest()
+    ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    message = ts + method.upper() + path + body
+    sig = base64.b64encode(
+        hmac.new(OKX_SECRET.encode(), message.encode(), hashlib.sha256).digest()
     ).decode()
     return {
         "OK-ACCESS-KEY": OKX_API_KEY,
-        "OK-ACCESS-SIGN": signature,
-        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json"
     }
 
-def get_usdt_balance():
+def get_balance():
     try:
         path = "/api/v5/account/balance?ccy=USDT"
         headers = get_headers("GET", path)
@@ -58,47 +70,120 @@ def get_usdt_balance():
         details = data.get("data", [{}])[0].get("details", [])
         for d in details:
             if d.get("ccy") == "USDT":
-                balance = float(d.get("availBal", 0))
-                log(f"Balance ya USDT: ${balance:.4f}")
-                return balance
+                return float(d.get("availBal", 0))
         return 0.0
     except Exception as e:
         log(f"Balance error: {e}")
         return 0.0
 
-def get_price():
+def get_all_spot_tickers():
     try:
-        path = f"/api/v5/market/ticker?instId={SYMBOL}"
+        path = "/api/v5/market/tickers?instType=SPOT"
         r = requests.get(BASE_URL + path, timeout=10)
-        data = r.json()
-        price = float(data.get("data", [{}])[0].get("last", 0))
-        return price
-    except Exception as e:
-        log(f"Price error: {e}")
-        return None
+        return r.json().get("data", [])
+    except:
+        return []
 
-def place_order(side, price, size):
+def get_candles(symbol, bar="1H", limit=24):
+    try:
+        path = f"/api/v5/market/candles?instId={symbol}&bar={bar}&limit={limit}"
+        r = requests.get(BASE_URL + path, timeout=10)
+        candles = r.json().get("data", [])
+        return [float(c[4]) for c in reversed(candles)]
+    except:
+        return []
+
+def get_price(symbol):
+    try:
+        path = f"/api/v5/market/ticker?instId={symbol}"
+        r = requests.get(BASE_URL + path, timeout=10)
+        return float(r.json().get("data", [{}])[0].get("last", 0))
+    except:
+        return 0.0
+
+def calculate_volatility(closes):
+    if len(closes) < 6:
+        return 0
+    changes = [abs(closes[i] - closes[i-1]) / closes[i-1] * 100
+               for i in range(1, len(closes))]
+    return sum(changes) / len(changes)
+
+def scan_best_coin():
+    log("🔍 Inascan coins za OKX Spot...")
+    tickers = get_all_spot_tickers()
+    candidates = []
+
+    for t in tickers:
+        inst_id = t.get("instId", "")
+        if not inst_id.endswith("-USDT"):
+            continue
+        base = inst_id.replace("-USDT", "")
+        if any(bl in base for bl in BLACKLIST):
+            continue
+        price = float(t.get("last", 0))
+        if price < MIN_PRICE or price > MAX_PRICE:
+            continue
+        vol = float(t.get("volCcy24h", 0))
+        vol_usd = vol * price
+        if vol_usd < MIN_VOLUME_USD:
+            continue
+        sod = float(t.get("sodUtc8", price))
+        change_pct = abs((price - sod) / sod * 100) if sod > 0 else 0
+        if change_pct < MIN_VOLATILITY or change_pct > MAX_VOLATILITY:
+            continue
+        candidates.append({
+            "instId": inst_id,
+            "price": price,
+            "vol_usd": vol_usd,
+            "change_pct": change_pct
+        })
+
+    candidates.sort(key=lambda x: x["vol_usd"], reverse=True)
+
+    best = None
+    best_score = 0
+
+    for coin in candidates[:15]:
+        closes = get_candles(coin["instId"])
+        if len(closes) < 6:
+            continue
+        volatility = calculate_volatility(closes)
+        if volatility < MIN_VOLATILITY or volatility > MAX_VOLATILITY:
+            continue
+        min_p = min(closes[-12:])
+        max_p = max(closes[-12:])
+        range_pct = (max_p - min_p) / min_p * 100
+        score = (volatility * 0.4) + (range_pct * 0.3) + (coin["vol_usd"] / 1_000_000 * 0.3)
+        if score > best_score:
+            best_score = score
+            best = coin
+            best["volatility"] = round(volatility, 2)
+            best["range_pct"] = round(range_pct, 2)
+        time.sleep(0.2)
+
+    return best
+
+def place_order(symbol, side, price, size):
     if DRY_RUN:
-        log(f"[SIM] {side} {size:.4f} XRP @ ${price:.4f}")
+        log(f"[SIM] {side} {size:.4f} @ ${price:.6f}")
         return {"ordId": "sim123"}
     try:
         path = "/api/v5/trade/order"
         body = json.dumps({
-            "instId": SYMBOL,
+            "instId": symbol,
             "tdMode": "cash",
             "side": side.lower(),
             "ordType": "limit",
-            "px": str(round(price, 4)),
+            "px": str(round(price, 6)),
             "sz": str(round(size, 4)),
         })
         headers = get_headers("POST", path, body)
         r = requests.post(BASE_URL + path, headers=headers, data=body, timeout=10)
         data = r.json()
-        result = data.get("data", [{}])[0]
         if data.get("code") == "0":
-            return result
+            return data.get("data", [{}])[0]
         else:
-            log(f"Order failed: {data.get('msg')} | {result.get('sMsg')}")
+            log(f"Order failed: {data.get('msg')}")
             return None
     except Exception as e:
         log(f"Order error: {e}")
@@ -112,107 +197,145 @@ def calculate_grids(current_price):
             continue
         price = current_price * (1 + i * GRID_SPREAD)
         side = "BUY" if i < 0 else "SELL"
-        grids.append({"price": round(price, 4), "side": side})
+        grids.append({"price": round(price, 6), "side": side})
     return grids
 
+def needs_rebalance(current_price, active_orders):
+    buy_prices = [o["price"] for o in active_orders if o["side"] == "BUY" and not o["filled"]]
+    sell_prices = [o["price"] for o in active_orders if o["side"] == "SELL" and not o["filled"]]
+    if not buy_prices or not sell_prices:
+        return True
+    if current_price > min(sell_prices) * (1 + REBALANCE_THRESHOLD):
+        return True
+    if current_price < max(buy_prices) * (1 - REBALANCE_THRESHOLD):
+        return True
+    return False
+
+def format_grid_report(active_orders, current_price):
+    buy_orders = [o for o in active_orders if o["side"] == "BUY" and not o["filled"]]
+    sell_orders = [o for o in active_orders if o["side"] == "SELL" and not o["filled"]]
+    filled_buys = [o for o in active_orders if o["side"] == "BUY" and o["filled"]]
+    filled_sells = [o for o in active_orders if o["side"] == "SELL" and o["filled"]]
+
+    lines = [f"💲 Bei sasa: ${current_price:.6f}\n"]
+
+    lines.append("🔴 SELL orders (zinangoja bei kupanda):")
+    for o in sorted(sell_orders, key=lambda x: x["price"]):
+        lines.append(f"  └ SELL @ ${o['price']:.6f} | {o['qty']:.4f}")
+
+    lines.append("")
+    lines.append("🟢 BUY orders (zinangoja bei kushuka):")
+    for o in sorted(buy_orders, key=lambda x: x["price"], reverse=True):
+        lines.append(f"  └ BUY @ ${o['price']:.6f} | {o['qty']:.4f}")
+
+    if filled_buys:
+        lines.append(f"\n✅ BUY zilizofanyika: {len(filled_buys)}")
+    if filled_sells:
+        lines.append(f"✅ SELL zilizofanyika: {len(filled_sells)}")
+
+    return "\n".join(lines)
+
 def run_grid_bot():
-    balance = get_usdt_balance()
+    global total_pnl, trade_count, current_symbol, initial_balance
+
+    balance = get_balance()
+    initial_balance = balance
 
     if balance < 1.0:
-        msg = f"❌ Balance ndogo sana: ${balance:.4f}\nHitaji angalau $1 USDT!"
+        msg = f"❌ Balance ndogo: ${balance:.4f}\nHitaji angalau $1 USDT!"
         log(msg)
         send_telegram(msg)
         return
 
     capital = round(balance * 0.95, 4)
 
-    mode = "🔴 LIVE" if not DRY_RUN else "🧪 SIMULATION"
-
-    msg = (
-        f"🤖 OKX XRP Grid Bot Inaanza!\n"
+    send_telegram(
+        f"🤖 OKX SMART GRID BOT!\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"💰 Balance: ${balance:.4f} USDT\n"
         f"💵 Capital: ${capital:.4f} USDT\n"
-        f"📊 Symbol: {SYMBOL}\n"
-        f"🔢 Grids: {GRID_COUNT}\n"
-        f"📏 Spread: {GRID_SPREAD*100}%\n"
-        f"⚡ Mode: {mode}"
+        f"🔢 Grids: {GRID_COUNT} | Spread: {GRID_SPREAD*100:.1f}%\n"
+        f"🔴 Mode: LIVE\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🔍 Inascan coin nzuri..."
     )
-    log(msg)
-    send_telegram(msg)
 
-    price = get_price()
-    if not price:
-        msg = "❌ Imeshindwa kupata price!"
-        log(msg)
-        send_telegram(msg)
-        return
-
-    msg = f"💲 XRP Bei ya sasa: ${price:.4f}"
-    log(msg)
-    send_telegram(msg)
-
-    grids = calculate_grids(price)
-    amount_per_grid = capital / (GRID_COUNT / 2)
-
+    last_scan = 0
     active_orders = []
-    grid_lines = []
-    for g in grids:
-        qty = amount_per_grid / g["price"]
-        active_orders.append({**g, "qty": qty, "filled": False})
-        emoji = "🟢" if g["side"] == "BUY" else "🔴"
-        grid_lines.append(f"{emoji} {g['side']} @ ${g['price']:.4f}")
-
-    grid_msg = "📋 Grid Levels:\n" + "\n".join(grid_lines)
-    log(grid_msg)
-    send_telegram(grid_msg)
-    send_telegram("👀 Bot inaangalia market...")
-
     filled_buys = []
-    total_pnl = 0.0
-    trade_count = 0
-    error_count = 0
-
-    # ✅ START WITH BUY
-    initial_qty = (capital * 0.2) / price
-    buy_result = place_order("BUY", price, initial_qty)
-    if buy_result:
-        msg = f"🚀 START BUY\n💲 Bei: ${price:.4f}\n📦 XRP: {initial_qty:.4f}"
-        log(msg)
-        send_telegram(msg)
-        filled_buys.append({
-            "price": price,
-            "qty": initial_qty,
-            "filled": True,
-            "sold": False
-        })
-
-    grid_top = max(g["price"] for g in grids)
+    current_price = 0
 
     while True:
         try:
-            current_price = get_price()
+            now = time.time()
+
+            if now - last_scan > SCAN_INTERVAL or not current_symbol:
+                coin = scan_best_coin()
+
+                if not coin:
+                    send_telegram("❌ Hakuna coin nzuri sasa.\n🔄 Itajaribu tena saa 1...")
+                    time.sleep(SCAN_INTERVAL)
+                    continue
+
+                new_symbol = coin["instId"]
+
+                if new_symbol != current_symbol:
+                    current_symbol = new_symbol
+                    active_orders = []
+                    filled_buys = []
+
+                    price = get_price(current_symbol)
+                    grids = calculate_grids(price)
+                    amount_per_grid = capital / (GRID_COUNT / 2)
+
+                    for g in grids:
+                        qty = amount_per_grid / g["price"]
+                        active_orders.append({**g, "qty": qty, "filled": False})
+
+                    grid_report = format_grid_report(active_orders, price)
+
+                    send_telegram(
+                        f"🎯 COIN IMECHAGULIWA!\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"📊 {current_symbol}\n"
+                        f"📈 Volatility: {coin['volatility']}%\n"
+                        f"📊 Range 12h: {coin['range_pct']}%\n"
+                        f"💧 Volume: ${coin['vol_usd']/1_000_000:.1f}M\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"{grid_report}"
+                    )
+
+                last_scan = now
+
+            current_price = get_price(current_symbol)
             if not current_price:
-                error_count += 1
-                time.sleep(5)
+                time.sleep(CHECK_INTERVAL)
                 continue
 
-            error_count = 0
-
-            # ✅ AUTO RESET GRID
-            if current_price > grid_top:
-                msg = f"🔄 RESET GRID\nPrice: ${current_price:.4f}"
-                log(msg)
-                send_telegram(msg)
-
-                price = current_price
-                grids = calculate_grids(price)
-
+            if needs_rebalance(current_price, active_orders):
+                log(f"🔄 Rebalancing @ ${current_price:.6f}...")
+                balance_now = get_balance()
+                grids = calculate_grids(current_price)
+                amount_per_grid = capital / (GRID_COUNT / 2)
                 active_orders = []
                 for g in grids:
                     qty = amount_per_grid / g["price"]
                     active_orders.append({**g, "qty": qty, "filled": False})
+                filled_buys = []
 
-                grid_top = max(g["price"] for g in grids)
+                grid_report = format_grid_report(active_orders, current_price)
+                balance_change = balance_now - initial_balance
+
+                send_telegram(
+                    f"🔄 GRIDS ZIMESASAHISHWA!\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📊 {current_symbol}\n"
+                    f"💰 Balance sasa: ${balance_now:.4f} USDT\n"
+                    f"📈 Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"{grid_report}"
+                )
+                time.sleep(CHECK_INTERVAL)
                 continue
 
             for order in active_orders:
@@ -220,34 +343,95 @@ def run_grid_bot():
                     continue
 
                 if order["side"] == "BUY" and current_price <= order["price"]:
-                    result = place_order("BUY", order["price"], order["qty"])
+                    result = place_order(current_symbol, "BUY", order["price"], order["qty"])
                     if result:
                         order["filled"] = True
                         filled_buys.append(order.copy())
                         trade_count += 1
-                        msg = f"🟢 BUY #{trade_count}\n💲 {order['price']:.4f}"
-                        log(msg)
-                        send_telegram(msg)
+
+                        pending_sells = [o for o in active_orders
+                                        if o["side"] == "SELL" and not o["filled"]]
+                        sell_targets = ", ".join([f"${o['price']:.6f}" for o in
+                                                 sorted(pending_sells, key=lambda x: x["price"])[:3]])
+
+                        balance_now = get_balance()
+                        balance_change = balance_now - initial_balance
+
+                        send_telegram(
+                            f"🟢 BUY #{trade_count} IMEFANYIKA!\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"📊 {current_symbol}\n"
+                            f"💲 Imenunua @ ${order['price']:.6f}\n"
+                            f"📦 Kiasi: {order['qty']:.4f}\n"
+                            f"🎯 Sell targets: {sell_targets}\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"💰 Balance sasa: ${balance_now:.4f} USDT\n"
+                            f"📈 Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                            f"🔴 LIVE"
+                        )
 
                 elif order["side"] == "SELL" and current_price >= order["price"]:
-                    matching_buy = next((b for b in filled_buys if not b.get("sold")), None)
-                    if matching_buy:
-                        result = place_order("SELL", order["price"], order["qty"])
+                    match = next((b for b in filled_buys if not b.get("sold")), None)
+                    if match:
+                        result = place_order(current_symbol, "SELL", order["price"], order["qty"])
                         if result:
                             order["filled"] = True
-                            matching_buy["sold"] = True
-                            pnl = (order["price"] - matching_buy["price"]) * order["qty"]
+                            match["sold"] = True
+                            pnl = (order["price"] - match["price"]) * order["qty"]
                             total_pnl += pnl
                             trade_count += 1
-                            msg = f"🔴 SELL #{trade_count}\n💰 +${pnl:.4f}"
-                            log(msg)
-                            send_telegram(msg)
 
-            time.sleep(5)
+                            balance_now = get_balance()
+                            balance_change = balance_now - initial_balance
 
+                            send_telegram(
+                                f"🔴 SELL #{trade_count} IMEFANYIKA!\n"
+                                f"━━━━━━━━━━━━━━━\n"
+                                f"📊 {current_symbol}\n"
+                                f"💲 Imenunua @ ${match['price']:.6f}\n"
+                                f"💲 Imeuza @ ${order['price']:.6f}\n"
+                                f"━━━━━━━━━━━━━━━\n"
+                                f"💰 PnL Trade: +${pnl:.4f} USDT\n"
+                                f"📈 Jumla PnL: ${total_pnl:.4f} USDT\n"
+                                f"━━━━━━━━━━━━━━━\n"
+                                f"💵 Balance sasa: ${balance_now:.4f} USDT\n"
+                                f"📊 Balance mwanzo: ${initial_balance:.4f} USDT\n"
+                                f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                                f"🔴 LIVE"
+                            )
+
+            all_filled = all(o["filled"] for o in active_orders)
+            if all_filled:
+                balance_now = get_balance()
+                balance_change = balance_now - initial_balance
+                send_telegram(
+                    f"🔄 Grids zote zimefanyika!\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📈 Jumla PnL: ${total_pnl:.4f}\n"
+                    f"💵 Balance sasa: ${balance_now:.4f} USDT\n"
+                    f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                    f"🔁 Inaanza upya..."
+                )
+                grids = calculate_grids(current_price)
+                active_orders = []
+                for g in grids:
+                    qty = capital / (GRID_COUNT / 2) / g["price"]
+                    active_orders.append({**g, "qty": qty, "filled": False})
+                filled_buys = []
+
+            time.sleep(CHECK_INTERVAL)
+
+        except KeyboardInterrupt:
+            balance_now = get_balance()
+            send_telegram(
+                f"🛑 Bot imesimamishwa!\n"
+                f"📈 Jumla PnL: ${total_pnl:.4f}\n"
+                f"💵 Balance ya mwisho: ${balance_now:.4f} USDT"
+            )
+            break
         except Exception as e:
             log(f"Error: {e}")
-            time.sleep(5)
+            time.sleep(10)
 
 if __name__ == "__main__":
     run_grid_bot()
