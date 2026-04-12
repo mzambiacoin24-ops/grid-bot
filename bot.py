@@ -23,13 +23,13 @@ REBALANCE_THRESHOLD = 0.015
 SCAN_INTERVAL = 3600
 CHECK_INTERVAL = 10
 
-MIN_VOLUME_USD = 500_000
-MIN_VOLATILITY = 2.0
-MAX_VOLATILITY = 15.0
-MIN_PRICE = 0.001
-MAX_PRICE = 100.0
+MIN_VOLUME_USD = 100_000
+MIN_CHANGE_PCT = 0.5
+MAX_CHANGE_PCT = 20.0
+MIN_PRICE = 0.0001
+MAX_PRICE = 200.0
 
-BLACKLIST = ["USDC", "USDT", "BUSD", "DAI", "TUSD", "USDP", "BTC", "ETH"]
+BLACKLIST = ["USDC", "USDT", "BUSD", "DAI", "TUSD", "USDP"]
 
 total_pnl = 0.0
 trade_count = 0
@@ -79,7 +79,7 @@ def get_balance():
 def get_all_spot_tickers():
     try:
         path = "/api/v5/market/tickers?instType=SPOT"
-        r = requests.get(BASE_URL + path, timeout=10)
+        r = requests.get(BASE_URL + path, timeout=15)
         return r.json().get("data", [])
     except:
         return []
@@ -102,7 +102,7 @@ def get_price(symbol):
         return 0.0
 
 def calculate_volatility(closes):
-    if len(closes) < 6:
+    if len(closes) < 4:
         return 0
     changes = [abs(closes[i] - closes[i-1]) / closes[i-1] * 100
                for i in range(1, len(closes))]
@@ -129,37 +129,39 @@ def scan_best_coin():
             continue
         sod = float(t.get("sodUtc8", price))
         change_pct = abs((price - sod) / sod * 100) if sod > 0 else 0
-        if change_pct < MIN_VOLATILITY or change_pct > MAX_VOLATILITY:
+        if change_pct < MIN_CHANGE_PCT or change_pct > MAX_CHANGE_PCT:
             continue
         candidates.append({
             "instId": inst_id,
             "price": price,
             "vol_usd": vol_usd,
-            "change_pct": change_pct
+            "change_pct": round(change_pct, 2)
         })
+
+    log(f"Candidates waliopatikana: {len(candidates)}")
 
     candidates.sort(key=lambda x: x["vol_usd"], reverse=True)
 
     best = None
     best_score = 0
 
-    for coin in candidates[:15]:
+    for coin in candidates[:20]:
         closes = get_candles(coin["instId"])
-        if len(closes) < 6:
+        if len(closes) < 4:
             continue
         volatility = calculate_volatility(closes)
-        if volatility < MIN_VOLATILITY or volatility > MAX_VOLATILITY:
+        if volatility < 0.1:
             continue
-        min_p = min(closes[-12:])
-        max_p = max(closes[-12:])
-        range_pct = (max_p - min_p) / min_p * 100
+        min_p = min(closes[-12:]) if len(closes) >= 12 else min(closes)
+        max_p = max(closes[-12:]) if len(closes) >= 12 else max(closes)
+        range_pct = (max_p - min_p) / min_p * 100 if min_p > 0 else 0
         score = (volatility * 0.4) + (range_pct * 0.3) + (coin["vol_usd"] / 1_000_000 * 0.3)
         if score > best_score:
             best_score = score
             best = coin
             best["volatility"] = round(volatility, 2)
             best["range_pct"] = round(range_pct, 2)
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     return best
 
@@ -212,27 +214,18 @@ def needs_rebalance(current_price, active_orders):
     return False
 
 def format_grid_report(active_orders, current_price):
-    buy_orders = [o for o in active_orders if o["side"] == "BUY" and not o["filled"]]
-    sell_orders = [o for o in active_orders if o["side"] == "SELL" and not o["filled"]]
-    filled_buys = [o for o in active_orders if o["side"] == "BUY" and o["filled"]]
-    filled_sells = [o for o in active_orders if o["side"] == "SELL" and o["filled"]]
-
+    buy_orders = sorted([o for o in active_orders if o["side"] == "BUY" and not o["filled"]],
+                        key=lambda x: x["price"], reverse=True)
+    sell_orders = sorted([o for o in active_orders if o["side"] == "SELL" and not o["filled"]],
+                         key=lambda x: x["price"])
     lines = [f"💲 Bei sasa: ${current_price:.6f}\n"]
-
-    lines.append("🔴 SELL orders (zinangoja bei kupanda):")
-    for o in sorted(sell_orders, key=lambda x: x["price"]):
-        lines.append(f"  └ SELL @ ${o['price']:.6f} | {o['qty']:.4f}")
-
+    lines.append("🔴 SELL (zinangoja kupanda):")
+    for o in sell_orders:
+        lines.append(f"  └ ${o['price']:.6f} | {o['qty']:.4f}")
     lines.append("")
-    lines.append("🟢 BUY orders (zinangoja bei kushuka):")
-    for o in sorted(buy_orders, key=lambda x: x["price"], reverse=True):
-        lines.append(f"  └ BUY @ ${o['price']:.6f} | {o['qty']:.4f}")
-
-    if filled_buys:
-        lines.append(f"\n✅ BUY zilizofanyika: {len(filled_buys)}")
-    if filled_sells:
-        lines.append(f"✅ SELL zilizofanyika: {len(filled_sells)}")
-
+    lines.append("🟢 BUY (zinangoja kushuka):")
+    for o in buy_orders:
+        lines.append(f"  └ ${o['price']:.6f} | {o['qty']:.4f}")
     return "\n".join(lines)
 
 def run_grid_bot():
@@ -273,9 +266,15 @@ def run_grid_bot():
                 coin = scan_best_coin()
 
                 if not coin:
-                    send_telegram("❌ Hakuna coin nzuri sasa.\n🔄 Itajaribu tena saa 1...")
-                    time.sleep(SCAN_INTERVAL)
-                    continue
+                    log("Hakuna coin — inatumia DOGE-USDT kama default...")
+                    coin = {
+                        "instId": "DOGE-USDT",
+                        "price": get_price("DOGE-USDT"),
+                        "vol_usd": 0,
+                        "change_pct": 0,
+                        "volatility": 0,
+                        "range_pct": 0
+                    }
 
                 new_symbol = coin["instId"]
 
@@ -298,9 +297,9 @@ def run_grid_bot():
                         f"🎯 COIN IMECHAGULIWA!\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"📊 {current_symbol}\n"
-                        f"📈 Volatility: {coin['volatility']}%\n"
-                        f"📊 Range 12h: {coin['range_pct']}%\n"
-                        f"💧 Volume: ${coin['vol_usd']/1_000_000:.1f}M\n"
+                        f"📈 Volatility: {coin.get('volatility', 0)}%\n"
+                        f"📊 Range 12h: {coin.get('range_pct', 0)}%\n"
+                        f"💧 Volume: ${coin['vol_usd']/1_000_000:.2f}M\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"{grid_report}"
                     )
@@ -313,8 +312,8 @@ def run_grid_bot():
                 continue
 
             if needs_rebalance(current_price, active_orders):
-                log(f"🔄 Rebalancing @ ${current_price:.6f}...")
                 balance_now = get_balance()
+                balance_change = balance_now - initial_balance
                 grids = calculate_grids(current_price)
                 amount_per_grid = capital / (GRID_COUNT / 2)
                 active_orders = []
@@ -322,16 +321,12 @@ def run_grid_bot():
                     qty = amount_per_grid / g["price"]
                     active_orders.append({**g, "qty": qty, "filled": False})
                 filled_buys = []
-
                 grid_report = format_grid_report(active_orders, current_price)
-                balance_change = balance_now - initial_balance
-
                 send_telegram(
                     f"🔄 GRIDS ZIMESASAHISHWA!\n"
-                    f"━━━━━━━━━━━━━━━\n"
                     f"📊 {current_symbol}\n"
-                    f"💰 Balance sasa: ${balance_now:.4f} USDT\n"
-                    f"📈 Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                    f"💰 Balance: ${balance_now:.4f} USDT\n"
+                    f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"{grid_report}"
                 )
@@ -348,15 +343,13 @@ def run_grid_bot():
                         order["filled"] = True
                         filled_buys.append(order.copy())
                         trade_count += 1
-
-                        pending_sells = [o for o in active_orders
-                                        if o["side"] == "SELL" and not o["filled"]]
-                        sell_targets = ", ".join([f"${o['price']:.6f}" for o in
-                                                 sorted(pending_sells, key=lambda x: x["price"])[:3]])
-
                         balance_now = get_balance()
                         balance_change = balance_now - initial_balance
-
+                        pending_sells = sorted(
+                            [o for o in active_orders if o["side"] == "SELL" and not o["filled"]],
+                            key=lambda x: x["price"]
+                        )
+                        sell_targets = " | ".join([f"${o['price']:.6f}" for o in pending_sells[:3]])
                         send_telegram(
                             f"🟢 BUY #{trade_count} IMEFANYIKA!\n"
                             f"━━━━━━━━━━━━━━━\n"
@@ -365,8 +358,8 @@ def run_grid_bot():
                             f"📦 Kiasi: {order['qty']:.4f}\n"
                             f"🎯 Sell targets: {sell_targets}\n"
                             f"━━━━━━━━━━━━━━━\n"
-                            f"💰 Balance sasa: ${balance_now:.4f} USDT\n"
-                            f"📈 Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                            f"💰 Balance: ${balance_now:.4f} USDT\n"
+                            f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f}\n"
                             f"🔴 LIVE"
                         )
 
@@ -380,22 +373,20 @@ def run_grid_bot():
                             pnl = (order["price"] - match["price"]) * order["qty"]
                             total_pnl += pnl
                             trade_count += 1
-
                             balance_now = get_balance()
                             balance_change = balance_now - initial_balance
-
                             send_telegram(
                                 f"🔴 SELL #{trade_count} IMEFANYIKA!\n"
                                 f"━━━━━━━━━━━━━━━\n"
                                 f"📊 {current_symbol}\n"
-                                f"💲 Imenunua @ ${match['price']:.6f}\n"
+                                f"💲 Ilinunua @ ${match['price']:.6f}\n"
                                 f"💲 Imeuza @ ${order['price']:.6f}\n"
                                 f"━━━━━━━━━━━━━━━\n"
-                                f"💰 PnL Trade: +${pnl:.4f} USDT\n"
+                                f"💰 PnL: +${pnl:.4f} USDT\n"
                                 f"📈 Jumla PnL: ${total_pnl:.4f} USDT\n"
                                 f"━━━━━━━━━━━━━━━\n"
-                                f"💵 Balance sasa: ${balance_now:.4f} USDT\n"
-                                f"📊 Balance mwanzo: ${initial_balance:.4f} USDT\n"
+                                f"💵 Balance: ${balance_now:.4f} USDT\n"
+                                f"📊 Mwanzo: ${initial_balance:.4f} USDT\n"
                                 f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
                                 f"🔴 LIVE"
                             )
@@ -406,10 +397,9 @@ def run_grid_bot():
                 balance_change = balance_now - initial_balance
                 send_telegram(
                     f"🔄 Grids zote zimefanyika!\n"
-                    f"━━━━━━━━━━━━━━━\n"
                     f"📈 Jumla PnL: ${total_pnl:.4f}\n"
-                    f"💵 Balance sasa: ${balance_now:.4f} USDT\n"
-                    f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f} USDT\n"
+                    f"💵 Balance: ${balance_now:.4f} USDT\n"
+                    f"{'📈' if balance_change >= 0 else '📉'} Mabadiliko: {'+' if balance_change >= 0 else ''}{balance_change:.4f}\n"
                     f"🔁 Inaanza upya..."
                 )
                 grids = calculate_grids(current_price)
